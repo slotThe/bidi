@@ -19,6 +19,7 @@ executable bidi
     import:           warnings
     main-is:          Main.hs
     other-modules:    Bidi
+                      HigherBidi
     -- other-extensions:
     build-depends:    base ^>=4.17.2.1
                     , containers
