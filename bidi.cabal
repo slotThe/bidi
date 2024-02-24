@@ -23,5 +23,6 @@ executable bidi
     -- other-extensions:
     build-depends:    base ^>=4.17.2.1
                     , containers
+                    , mtl
     hs-source-dirs:   app
     default-language: GHC2021
