@@ -1,6 +1,7 @@
 module Main where
 
 import Bidi
+import qualified HigherBidi as H
 import GHC.Exts
 import Data.Foldable (traverse_)
 
@@ -21,3 +22,4 @@ main = traverse_ (print . uncurry infer)
           (Var "y")
     )
   ]
+  >> H.test

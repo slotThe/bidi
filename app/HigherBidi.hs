@@ -20,13 +20,42 @@ The article is readily available <https://arxiv.org/abs/1306.6032 on the arXiv>.
 NOTE: Alignment of comments might be missing off due to some personal
 `prettify-symbols-mode` settings for `haskell-mode`. Sorry.
 -}
-module HigherBidi where
+module HigherBidi (
+  typeCheck,
+  test,
+) where
 
-import Control.Monad.State.Strict (State, modify', get, evalState)
+import Control.Monad.State.Strict (State, evalState, get, modify')
 import Data.List (delete, find)
 import Data.Maybe (mapMaybe)
-import GHC.List (foldl')
 import GHC.Stack (HasCallStack)
+
+test :: IO ()
+test = do
+  print $ typeCheck identity
+  print $ typeCheck identity2
+  print $ typeCheck (Ann identity2 (TForall tv (ttv :-> ttv)))
+  print $ typeCheck (App identity Unit)
+  print $ typeCheck (App (Lam "x" (Var "x")) Unit)
+  print $ typeCheck (App (Lam "f" (App (Var "f") Unit)) identity)
+  print $ typeCheck (Lam "x" (Lam "y" (Var "x")))
+  print $ typeCheck (Lam "x" (Lam "x" (Var "x")))
+  print $ typeCheck (Lam "x" (Lam "y" (Var "y")))
+ where
+  tv = TypVar (-1)
+  ttv = TVar tv
+
+  identity :: Expr
+  identity = Ann (Lam "x" (Var "x")) (TForall tv (ttv :-> ttv))
+
+  identity2 :: Expr
+  identity2 = App identity identity
+
+-- | Type check an expression.
+typeCheck :: Expr -> (Type, Ctx)
+typeCheck e = (applyCtx ctx typ, ctx)
+ where
+  (typ, ctx) = evalState (infer [] e) 0
 
 
 -----------------------------------------------------------------------
