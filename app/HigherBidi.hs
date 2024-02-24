@@ -33,14 +33,14 @@ data Expr
   deriving (Show)
 
 -- | An existential type variable.
-newtype Existential = Ex Int
+newtype TypVar = TypVar Int
  deriving (Show, Eq)
 
 -- | The type of a type: Figure 6.
 data Type
   = TUnit                -- ^ 1
-  | TVar String          -- ^ α
-  | TExt Existential     -- ^ α̂
+  | TVar TypVar          -- ^ α
+  | TExt TypVar          -- ^ α̂
   | TForall String Type  -- ^ ∀α. A
   | Type :-> Type        -- ^ A → B
  deriving (Show, Eq)
@@ -49,8 +49,8 @@ infixr :->
 -- | A type without quantification: Figure 6.
 data Monotype
   = MTUnit                 -- ^ 1
-  | MTVar String           -- ^ α
-  | MTExt Existential      -- ^ α̂
+  | MTVar TypVar           -- ^ α
+  | MTExt TypVar           -- ^ α̂
   | Monotype :-< Monotype  -- ^ τ → σ
  deriving (Show, Eq)
 infixr :-<
@@ -65,11 +65,11 @@ monoToPoly = \case
 
 -- | What's in a context: Figure 6.
 data CtxItem
-  = CVar String               -- ^ α
-  | CAnn String Type          -- ^ x : A
-  | CUns Existential          -- ^ α̂
-  | CSol Existential Monotype -- ^ α̂ = τ
-  | CMar Existential          -- ^ ▸α̂
+  = CVar String          -- ^ α
+  | CAnn String Type     -- ^ x : A
+  | CUns TypVar          -- ^ α̂
+  | CSol TypVar Monotype -- ^ α̂ = τ
+  | CMar TypVar          -- ^ ▸α̂
   deriving (Eq, Show)
 
 -- | A context.
@@ -84,7 +84,7 @@ wellFormed ctx = \case
   TForall s t -> wellFormed (CVar s : ctx) t            -- ForallWF
   t₁ :-> t₂   -> wellFormed ctx t₁ && wellFormed ctx t₂ -- ArrowWF
  where
-  isSolved :: Existential -> Bool
+  isSolved :: TypVar -> Bool
   isSolved α̂ = or [ α̂ == β̂ | CSol β̂ _ <- ctx ]
 
 -- | Γ ctx: Algorithmic context Γ is well-formed. Figure 7.
@@ -101,7 +101,7 @@ wellFormedΓ = \case
   domAnn :: Ctx -> [String]
   domAnn ctx = [ x | CAnn x _ <- ctx ]
 
-  domEx :: Ctx -> [Existential]
+  domEx :: [CtxItem] -> [TypVar]
   domEx = mapMaybe (\case CUns α̂   -> Just α̂
                           CSol α̂ _ -> Just α̂
                           _        -> Nothing)
