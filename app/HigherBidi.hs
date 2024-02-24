@@ -14,10 +14,14 @@ typed lambda calculus. The main source was the following survey:
   - Jana Dunfield and Neelakantan R. Krishnaswami. 2013. Complete and easy bidirectional typechecking for higher-rank polymorphism. In Proceedings of the 18th ACM SIGPLAN international conference on Functional programming (ICFP '13). Association for Computing Machinery, New York, NY, USA, 429–442. https://doi.org/10.1145/2500365.2500582
 
 The article is readily available <https://arxiv.org/abs/1306.6032 on the arXiv>.
+
+NOTE: Alignment of comments might be missing off due to some personal
+`prettify-symbols-mode` settings for `haskell-mode`. Sorry.
 -}
 module HigherBidi where
 
 import GHC.List (foldl')
+import Data.Maybe (mapMaybe)
 
 -- | Source expressions: Figure 1.
 data Expr
@@ -52,12 +56,12 @@ data Monotype
 infixr :-<
 
 -- | Turn a 'Monotype' into a real 'Type'.
-monoToType :: Monotype -> Type
-monoToType = \case
+monoToPoly :: Monotype -> Type
+monoToPoly = \case
   MTUnit -> TUnit
   MTVar s -> TVar s
   MTExt α̂ -> TExt α̂
-  τ :-< σ -> monoToType τ :-> monoToType σ
+  τ :-< σ -> monoToPoly τ :-> monoToPoly σ
 
 -- | What's in a context: Figure 6.
 data CtxItem
@@ -71,6 +75,37 @@ data CtxItem
 -- | A context.
 type Ctx = [CtxItem]
 
+-- | Γ ⊢ A: Under context Γ, type A is well-formed. Figure 7.
+wellFormed :: Ctx -> Type -> Bool
+wellFormed ctx = \case
+  TUnit       -> True                                   -- UnitWF
+  TVar α      -> CVar α `elem` ctx                           -- UvarWF
+  TExt α̂      -> CUns α̂ `elem` ctx || isSolved α̂             -- EvarWF and SolvedEvarWF
+  TForall s t -> wellFormed (CVar s : ctx) t            -- ForallWF
+  t₁ :-> t₂   -> wellFormed ctx t₁ && wellFormed ctx t₂ -- ArrowWF
+ where
+  isSolved :: Existential -> Bool
+  isSolved α̂ = or [ α̂ == β̂ | CSol β̂ _ <- ctx ]
+
+-- | Γ ctx: Algorithmic context Γ is well-formed. Figure 7.
+wellFormedΓ :: Ctx -> Bool
+wellFormedΓ = \case
+  []       -> True                                                             -- EmptyCtx
+  (c : cs) -> case c of
+    CVar α   -> wellFormedΓ cs && CVar α `notElem` cs                                  -- UvarCtx
+    CAnn x t -> wellFormedΓ cs && x `notElem` domAnn cs && wellFormed cs t             -- VarCtx
+    CUns α̂   -> wellFormedΓ cs && α̂ `notElem` domEx cs                                 -- EvarCtx
+    CSol α̂ τ -> wellFormedΓ cs && α̂ `notElem` domEx cs && wellFormed cs (monoToPoly τ) -- SolvedEvarCtx
+    CMar α̂   -> wellFormedΓ cs && CMar α̂ `notElem` cs && α̂ `notElem` domEx cs                  -- MarkerCtx
+ where
+  domAnn :: Ctx -> [String]
+  domAnn ctx = [ x | CAnn x _ <- ctx ]
+
+  domEx :: Ctx -> [Existential]
+  domEx = mapMaybe (\case CUns α̂   -> Just α̂
+                          CSol α̂ _ -> Just α̂
+                          _        -> Nothing)
+
 -- | Apply a context, as a substitution, to a type: Figure 8.
 applyCtx :: Ctx -> Type -> Type
 applyCtx ctx typ =
@@ -82,19 +117,7 @@ applyCtx ctx typ =
  where
   subst :: Existential -> Monotype -> Type -> Type
   subst α̂ τ = \case
-    t@(TExt β̂)  -> if α̂ == β̂ then monoToType τ else t
+    t@(TExt β̂)  -> if α̂ == β̂ then monoToPoly τ else t
     t₁ :-> t₂   -> subst α̂ τ t₁ :-> subst α̂ τ t₂
     TForall s t -> TForall s (subst α̂ τ t)
     t           -> t
-
--- | Γ ⊢ A: Under context Γ, type A is well-formed. Figure 7.
-wellFormed :: Ctx -> Type -> Bool
-wellFormed ctx = \case
-  TUnit       -> True                                   -- UnitWF
-  TVar α      -> CVar α `elem` ctx                           -- UvarWF
-  TExt α̂      -> CUns α̂ `elem` ctx || isSolved α̂             -- EvarWF and SolvedEvarWF
-  TForall s t -> wellFormed (CVar s : ctx) t            -- ForallWF
-  t₁ :-> t₂   -> wellFormed ctx t₁ && wellFormed ctx t₂ -- ArrowWF
- where
-  isSolved :: Existential -> Bool
-  isSolved α̂ = any (\case CSol β̂ _ -> α̂ == β̂; _ -> False) ctx
