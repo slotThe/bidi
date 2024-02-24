@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 {- |
    Module      : HigherBidi
    Description : Complete and Easy Bidirectional Typechecking for Higher-Rank Polymorphism
@@ -20,12 +21,11 @@ NOTE: Alignment of comments might be missing off due to some personal
 -}
 module HigherBidi where
 
-import GHC.List (foldl')
-import Data.Maybe (mapMaybe)
 import Control.Monad.State.Strict (State, modify', get)
-import GHC.Stack (HasCallStack)
 import Data.List (delete)
-import Control.Monad (guard)
+import Data.Maybe (mapMaybe)
+import GHC.List (foldl')
+import GHC.Stack (HasCallStack)
 
 
 -----------------------------------------------------------------------
@@ -75,6 +75,17 @@ monoToPoly = \case
   MTExt α̂ -> TExt α̂
   τ :-< σ -> monoToPoly τ :-> monoToPoly σ
 
+polyToMono :: Type -> Maybe Monotype
+polyToMono = \case
+  TUnit -> Just MTUnit
+  TVar s -> Just $ MTVar s
+  TExt α̂ -> Just $ MTExt α̂
+  a :-> b -> do
+    τ <- polyToMono a
+    σ <- polyToMono b
+    pure $ τ :-< σ
+  TForall _ _ -> Nothing
+
 -- | Free variables.
 fv :: Type -> [TypVar]
 fv = \case
@@ -108,6 +119,24 @@ fresh = do
 dropAfterItem :: CtxItem -> Ctx -> Ctx
 dropAfterItem item = takeWhile (/= item)
 
+-- | Split a context Γ into Γ',A,Γ''.
+splitCtx :: Ctx -> CtxItem -> (Ctx, Ctx)
+splitCtx ctx a = case r of
+  []       -> (l, []) -- should be impossible, given a well-formed context
+  (_ : r') -> (l, r')
+ where
+  (l, r) = break (== a) ctx
+
+-- | `leftOf Γ α β` checks whether α occurs to the left of β in Γ.
+leftOf :: Ctx -> CtxItem -> CtxItem -> Bool
+leftOf ctx α β = go False ctx
+ where
+  go :: Bool -> [CtxItem] -> Bool
+  go _     []       = die
+  go αSeen (c : cs)
+    | c == β    = αSeen
+    | c == α    = go True cs
+    | otherwise = go αSeen cs
 
 -----------------------------------------------------------------------
 -- Well-formedness
@@ -222,9 +251,71 @@ subtype ctx a b
 -----------------------------------------------------------------------
 -- Instantiation
 
-instantiateL = undefined
-instantiateR = undefined
+-- | Γ ⊢ α̂ :=< A ⊣ Δ: Under input context Γ, instantiate α̂ such that α̂ <: A,
+-- with output context Δ.
+instantiateL :: Ctx -> TypVar -> Type -> State Int Ctx
+instantiateL ctx α̂ a = case polyToMono a of
+  Just τ -> do                                               -- InstLSolve
+    let (ctxL, ctxR) = splitCtx ctx (CUns α̂)
+    if wellFormed ctxL a
+      then pure $ ctxL ++ [CSol α̂ τ] ++ ctxR
+      else die
+  Nothing -> case a of
+    TExt β̂ -> if leftOf ctx (CUns α̂) (CUns β̂)                -- InstLReach
+      then let (ctxL, ctxR) = splitCtx ctx (CUns β̂)
+           in pure $ ctxL ++ [CSol β̂ (MTVar α̂)] ++ ctxR
+      else let (ctxL, ctxR) = splitCtx ctx (CUns α̂)
+           in pure $ ctxL ++ [CSol α̂ (MTVar β̂)] ++ ctxR
+    a₁ :-> a₂ -> do                                          -- InstLArr
+      let (ctxL, ctxR) = splitCtx ctx (CUns α̂)
+      â₁ <- fresh
+      â₂ <- fresh
+      let extCtx = mconcat
+            [ ctxL
+            , [ CUns â₂
+              , CUns â₁
+              , CSol α̂ (MTVar â₁ :-< MTVar â₂)
+              ]
+            , ctxR
+            ]
+      ctxΘ <- instantiateR extCtx a₁ â₁
+      instantiateL ctxΘ â₂ (applyCtx ctxΘ a₂)
+    TForall β b -> do                                        -- InstLAIIR
+      β̂fresh <- fresh
+      let extCtx = ctx ++ [CMar β̂fresh, CUns β̂fresh]
+          substB = substType (TExt β̂fresh) β b
+      ctxΔ <- instantiateL extCtx α̂ substB
+      pure $ dropAfterItem (CMar β̂fresh) ctxΔ
+    _ -> die
 
+-- | Γ ⊢ A =:< α̂ ⊣ Δ: Under input context Γ, instantiate α̂ such that A <: α̂,
+-- with output context Δ.
+instantiateR :: Ctx -> Type -> TypVar -> State Int Ctx
+instantiateR ctx a α̂ = case polyToMono a of
+  Just _  -> instantiateL ctx α̂ a                            -- InstRSolve
+  Nothing -> case a of
+    TExt _ -> instantiateL ctx α̂ a                           -- InstRReach
+    a₁ :-> a₂ -> do                                          -- InstRArr
+      let (ctxL, ctxR) = splitCtx ctx (CUns α̂)
+      â₁ <- fresh
+      â₂ <- fresh
+      let extCtx = mconcat
+            [ ctxL
+            , [ CUns â₂
+              , CUns â₁
+              , CSol α̂ (MTVar â₁ :-< MTVar â₂)
+              ]
+            , ctxR
+            ]
+      ctxΘ <- instantiateL extCtx â₁ a₁
+      instantiateR ctxΘ (applyCtx ctxΘ a₂) â₂
+    TForall β b -> do                                        -- InstRAIIL
+      βfresh <- fresh
+      let extCtx = ctx ++ [CUns βfresh]
+          cleanB = substType (TVar βfresh) β b
+      ctxΔ <- instantiateL extCtx α̂ cleanB
+      pure $ dropAfterItem (CVar βfresh) ctxΔ
+    _ -> die
 
 -----------------------------------------------------------------------
 -- Util
