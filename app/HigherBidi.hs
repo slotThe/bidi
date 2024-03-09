@@ -41,6 +41,8 @@ test = do
   print $ typeCheck (Lam "x" (Lam "y" (Var "x")))
   print $ typeCheck (Lam "x" (Lam "x" (Var "x")))
   print $ typeCheck (Lam "x" (Lam "y" (Var "y")))
+  print $ typeCheck (App (Lam "x" (Lam "y" (Var "x")))
+                         (Lam "z" (Var "z")))
  where
   tv = TypVar (-1)
   ttv = TVar tv
@@ -269,7 +271,6 @@ subtype ctx a b = case (a, b) of
         cleanB = substType (TVar freshα) α b -- B
     dropAfterItem (CVar freshα) <$>
       subtype extendedCtx a cleanB           -- Δ,α,Θ  →  Δ
-
   (TForall α a, b) -> do                                              -- <:∀L
     freshα̂ <- fresh
     let extCtx = ctx ++ [CMar freshα̂, CUns freshα̂] -- Γ,▸α̂,α̂
@@ -386,7 +387,7 @@ infer ctx e = case e of
     (a, ctxΘ) <- infer ctx e₁
     appType ctxΘ (applyCtx ctxΘ a) e₂
 
--- | Γ ⊢ A ⇐ A ⊣ Δ: Under input context Γ, e checks against input type A, with
+-- | Γ ⊢ e ⇐ A ⊣ Δ: Under input context Γ, e checks against input type A, with
 -- output context Δ.
 check :: Ctx -> Expr -> Type -> State Int Ctx
 -- check ctx e b | trace ("check; ctx" <> show ctx <> "  e: " <> show e <> "  b: " <> show b) False = undefined
