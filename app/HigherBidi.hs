@@ -1,4 +1,6 @@
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {- |
@@ -21,11 +23,13 @@ NOTE: Alignment of comments might be missing off due to some personal
 `prettify-symbols-mode` settings for `haskell-mode`. Sorry.
 -}
 module HigherBidi (
-  typeCheck,
   test,
+  typeCheck,
+  wellFormedΓ,
 ) where
 
 import Control.Monad.State.Strict (State, evalState, get, modify')
+import qualified Data.Kind (Type)
 import Data.List (delete, find)
 import Data.Maybe (mapMaybe)
 import GHC.Stack (HasCallStack)
@@ -34,7 +38,7 @@ test :: IO ()
 test = do
   print $ typeCheck identity
   print $ typeCheck identity2
-  print $ typeCheck (Ann identity2 (TForall tv (ttv :-> ttv)))
+  print $ typeCheck (Ann identity2 (Forall tv (ttv :-> ttv)))
   print $ typeCheck (App identity Unit)
   print $ typeCheck (App (Lam "x" (Var "x")) Unit)
   print $ typeCheck (App (Lam "f" (App (Var "f") Unit)) identity)
@@ -48,13 +52,13 @@ test = do
   ttv = TVar tv
 
   identity :: Expr
-  identity = Ann (Lam "x" (Var "x")) (TForall tv (ttv :-> ttv))
+  identity = Ann (Lam "x" (Var "x")) (Forall tv (ttv :-> ttv))
 
   identity2 :: Expr
   identity2 = App identity identity
 
 -- | Type check an expression.
-typeCheck :: Expr -> (Type, Ctx)
+typeCheck :: Expr -> (Polytype, Ctx)
 typeCheck e = (applyCtx ctx typ, ctx)
  where
   (typ, ctx) = evalState (infer [] e) 0
@@ -65,11 +69,11 @@ typeCheck e = (applyCtx ctx typ, ctx)
 
 -- | Source expressions: Figure 1.
 data Expr
-  = Var String       -- ^ Variable
-  | Unit             -- ^ Unit
-  | Lam String Expr  -- ^ Lambda
-  | App Expr Expr    -- ^ Application
-  | Ann Expr Type    -- ^ Annotated type
+  = Var String        -- ^ Variable
+  | Unit              -- ^ Unit
+  | Lam String Expr   -- ^ Lambda
+  | App Expr Expr     -- ^ Application
+  | Ann Expr Polytype -- ^ Annotated type
   deriving (Show)
 
 -- | [e/x]f: Substitute the expression e for the variable x in the expression f.
@@ -92,62 +96,61 @@ substExpr to from = go
 newtype TypVar = TypVar Int
  deriving (Show, Eq)
 
--- | The type of a type: Figure 6.
-data Type
-  = TUnit                -- ^ 1
-  | TVar TypVar          -- ^ α
-  | TExt TypVar          -- ^ α̂
-  | TForall TypVar Type  -- ^ ∀α. A
-  | Type :-> Type        -- ^ A → B
- deriving (Show, Eq)
-infixr :->
+-- | We have two kinds of types: monotypes and polytypes. The latter is just
+-- like the former, but without universal quantification.
+data Kind     = Mono | Poly
+type Monotype = Type Mono
+type Polytype = Type Poly
 
--- | A type without quantification: Figure 6.
-data Monotype
-  = MTUnit                 -- ^ 1
-  | MTVar TypVar           -- ^ α
-  | MTExt TypVar           -- ^ α̂
-  | Monotype :-< Monotype  -- ^ τ → σ
- deriving (Show, Eq)
-infixr :-<
+-- | Type of a type: Figure 6.
+type Type :: Kind -> Data.Kind.Type
+data Type t where
+  TUnit  :: Type t                         -- ^ 1
+  TVar   :: TypVar -> Type t               -- ^ α
+  Exist  :: TypVar -> Type t               -- ^ α̂
+  Forall :: TypVar -> Polytype -> Polytype -- ^ ∀α. A
+  (:->)  :: Type t -> Type t -> Type t     -- ^ A → B
+infixr :->
+deriving instance Show (Type t)
+deriving instance Eq   (Type t)
 
 -- | Turn a 'Monotype' into a real 'Type'.
-monoToPoly :: Monotype -> Type
+monoToPoly :: Monotype -> Polytype
 monoToPoly = \case
-  MTUnit -> TUnit
-  MTVar s -> TVar s
-  MTExt α̂ -> TExt α̂
-  τ :-< σ -> monoToPoly τ :-> monoToPoly σ
+  TUnit   -> TUnit
+  TVar s  -> TVar s
+  Exist α̂  -> Exist α̂
+  τ :-> σ -> monoToPoly τ :-> monoToPoly σ
 
-polyToMono :: Type -> Maybe Monotype
+polyToMono :: Polytype -> Maybe Monotype
 polyToMono = \case
-  TUnit  -> Just MTUnit
-  TVar s -> Just $ MTVar s
-  TExt α̂ -> Just $ MTExt α̂
+  TUnit  -> Just TUnit
+  TVar s -> Just $ TVar s
+  Exist α̂ -> Just $ Exist α̂
   a :-> b -> do
     τ <- polyToMono a
     σ <- polyToMono b
-    pure $ τ :-< σ
-  TForall _ _ -> Nothing
+    pure $ τ :-> σ
+  Forall _ _ -> Nothing
 
 -- | Free variables.
-fv :: Type -> [TypVar]
+fv :: Polytype -> [TypVar]
 fv = \case
   TUnit       -> []
   TVar α      -> [α]
-  TExt α̂      -> [α̂]
-  TForall α a -> delete α (fv a)
+  Exist α̂      -> [α̂]
+  Forall α a -> delete α (fv a)
   a :-> b     -> fv a ++ fv b
 
 -- | [B.α]A: substitute a type variable for another type in a type.
-substType :: Type -> TypVar -> Type -> Type
+substType :: Polytype -> TypVar -> Polytype -> Polytype
 substType to from = go
  where
-  go :: Type -> Type
+  go :: Polytype -> Polytype
   go = \case
     TVar α      -> if α == from then to else TVar α
-    TExt α̂      -> if α̂ == from then to else TExt α̂
-    TForall α a -> TForall α (if α == from then a else go a)
+    Exist α̂      -> if α̂ == from then to else Exist α̂
+    Forall α a -> Forall α (if α == from then a else go a)
     a :-> b     -> go a :-> go b
     TUnit       -> TUnit
 
@@ -158,7 +161,7 @@ substType to from = go
 -- | What's in a context: Figure 6.
 data CtxItem
   = CVar TypVar          -- ^ α
-  | CAnn String Type     -- ^ x : A
+  | CAnn String Polytype -- ^ x : A
   | CUns TypVar          -- ^ α̂
   | CSol TypVar Monotype -- ^ α̂ = τ
   | CMar TypVar          -- ^ ▸α̂
@@ -195,7 +198,7 @@ leftOf ctx α β = go False ctx
     | otherwise = go αSeen cs
 
 -- | Apply a context, as a substitution, to a type: Figure 8.
-applyCtx :: [CtxItem] -> Type -> Type
+applyCtx :: [CtxItem] -> Polytype -> Polytype
 applyCtx ctx typ =
   foldr (\c accType -> case c of
              CSol α̂ τ -> subst α̂ τ accType
@@ -203,11 +206,11 @@ applyCtx ctx typ =
          typ
          ctx
  where
-  subst :: TypVar -> Monotype -> Type -> Type
+  subst :: TypVar -> Monotype -> Polytype -> Polytype
   subst α̂ τ = \case
-    t@(TExt β̂)  -> if α̂ == β̂ then monoToPoly τ else t
+    t@(Exist β̂)  -> if α̂ == β̂ then monoToPoly τ else t
     t₁ :-> t₂   -> subst α̂ τ t₁ :-> subst α̂ τ t₂
-    TForall s t -> TForall s (subst α̂ τ t)
+    Forall s t -> Forall s (subst α̂ τ t)
     t           -> t
 
 
@@ -215,12 +218,12 @@ applyCtx ctx typ =
 -- Well-formedness
 
 -- | Γ ⊢ A: Under context Γ, type A is well-formed. Figure 7.
-wellFormed :: [CtxItem] -> Type -> Bool
+wellFormed :: [CtxItem] -> Polytype -> Bool
 wellFormed ctx = \case
   TUnit       -> True                                   -- UnitWF
   TVar α      -> CVar α `elem` ctx                           -- UvarWF
-  TExt α̂      -> CUns α̂ `elem` ctx || isSolved α̂             -- EvarWF and SolvedEvarWF
-  TForall s t -> wellFormed (ctx ++ [CVar s]) t         -- ForallWF
+  Exist α̂      -> CUns α̂ `elem` ctx || isSolved α̂             -- EvarWF and SolvedEvarWF
+  Forall s t -> wellFormed (ctx ++ [CVar s]) t         -- ForallWF
   t₁ :-> t₂   -> wellFormed ctx t₁ && wellFormed ctx t₂ -- ArrowWF
  where
   isSolved :: TypVar -> Bool
@@ -251,7 +254,7 @@ wellFormedΓ = \case
 
 -- | Γ ⊢ A <: B ⊣ Δ: Under input context Γ, type A is a subtype of B, with
 -- output context Δ. Figure 9.
-subtype :: Ctx -> Type -> Type -> State Int Ctx
+subtype :: Ctx -> Polytype -> Polytype -> State Int Ctx
 -- subtype ctx a b | trace ("subtype; ctx: " <> show ctx <> "  a: " <> show a <> "  b: " <> show b) False = undefined
 subtype ctx a b = case (a, b) of
   (TVar α, TVar β)       ->                                           -- <:Var
@@ -262,7 +265,7 @@ subtype ctx a b = case (a, b) of
     subtype ctxΘ
             (applyCtx ctxΘ a₂) -- [Θ]A₂
             (applyCtx ctxΘ b₂) -- [Θ]B₂
-  (a, TForall α b) -> do                                              -- <:∀R
+  (a, Forall α b) -> do                                              -- <:∀R
     freshα <- fresh
     let extendedCtx = ctx ++ [CVar freshα]   -- Γ,α
         -- N.b.: not in Figure 9, but important in the
@@ -271,15 +274,15 @@ subtype ctx a b = case (a, b) of
         cleanB = substType (TVar freshα) α b -- B
     dropAfterItem (CVar freshα) <$>
       subtype extendedCtx a cleanB           -- Δ,α,Θ  →  Δ
-  (TForall α a, b) -> do                                              -- <:∀L
+  (Forall α a, b) -> do                                              -- <:∀L
     freshα̂ <- fresh
     let extCtx = ctx ++ [CMar freshα̂, CUns freshα̂] -- Γ,▸α̂,α̂
-        substA = substType (TExt freshα̂) α a       -- [α̂/α]A
+        substA = substType (Exist freshα̂) α a       -- [α̂/α]A
     dropAfterItem (CMar freshα̂) <$>
       subtype extCtx substA b                      -- Δ,▸α̂,Θ  →  Δ
-  (TExt α̂, TExt β̂) | α̂ == β̂   -> pure ctx                             -- <:Exvar
-  (TExt α̂, a)      | α̂ `notElem` fv a -> instantiateL ctx α̂ a                 -- <:InstantiateL
-  (a, TExt α̂)      | α̂ `notElem` fv a -> instantiateR ctx a α̂                 -- <:InstantiateR
+  (Exist α̂, Exist β̂) | α̂ == β̂   -> pure ctx                             -- <:Exvar
+  (Exist α̂, a)      | α̂ `notElem` fv a -> instantiateL ctx α̂ a                 -- <:InstantiateL
+  (a, Exist α̂)      | α̂ `notElem` fv a -> instantiateR ctx a α̂                 -- <:InstantiateR
   _ -> die
 
 
@@ -288,14 +291,14 @@ subtype ctx a b = case (a, b) of
 
 -- | Γ ⊢ α̂ :=< A ⊣ Δ: Under input context Γ, instantiate α̂ such that α̂ <: A,
 -- with output context Δ.
-instantiateL :: Ctx -> TypVar -> Type -> State Int Ctx
+instantiateL :: Ctx -> TypVar -> Polytype -> State Int Ctx
 -- instantiateL ctx α̂ a | trace ("instantiateL; ctx: " <> show ctx <> "  α̂: " <> show α̂ <> "  a: " <> show a) False = undefined
 instantiateL ctx α̂ a = case instLSolve ctx α̂ a of
   Just ctx -> pure ctx                                             -- InstLSolve
   Nothing  -> case a of
-    TExt β̂ | leftOf ctx (CUns α̂) (CUns β̂) ->                       -- InstLReach
+    Exist β̂ | leftOf ctx (CUns α̂) (CUns β̂) ->                       -- InstLReach
       let (ctxL, ctxR) = splitCtx ctx (CUns β̂)
-       in pure $ ctxL ++ [CSol β̂ (MTExt α̂)] ++ ctxR -- Γ[α̂][β̂ = α̂]
+       in pure $ ctxL ++ [CSol β̂ (Exist α̂)] ++ ctxR -- Γ[α̂][β̂ = α̂]
     a₁ :-> a₂ -> do                                                -- InstLArr
       α̂₁ <- fresh
       α̂₂ <- fresh
@@ -304,13 +307,13 @@ instantiateL ctx α̂ a = case instLSolve ctx α̂ a of
             [ ctxL
             , [ CUns α̂₂
               , CUns α̂₁
-              , CSol α̂ (MTExt α̂₁ :-< MTExt α̂₂)
+              , CSol α̂ (Exist α̂₁ :-> Exist α̂₂)
               ]
             , ctxR
             ]
       ctxΘ <- instantiateR extCtx a₁ α̂₁
       instantiateL ctxΘ α̂₂ (applyCtx ctxΘ a₂)
-    TForall β b -> do                                              -- InstLAIIR
+    Forall β b -> do                                              -- InstLAIIR
       βfresh <- fresh
       let extCtx = ctx ++ [CVar βfresh]
           substB = substType (TVar βfresh) β b
@@ -318,7 +321,7 @@ instantiateL ctx α̂ a = case instLSolve ctx α̂ a of
         instantiateL extCtx α̂ substB
     _ -> die
 
-instLSolve :: Ctx -> TypVar -> Type -> Maybe Ctx
+instLSolve :: Ctx -> TypVar -> Polytype -> Maybe Ctx
 instLSolve ctx α̂ a = case polyToMono a of
   Just τ | wellFormed ctxL a -> Just $ ctxL ++ [CSol α̂ τ] ++ ctxR
   _                          -> Nothing
@@ -327,12 +330,12 @@ instLSolve ctx α̂ a = case polyToMono a of
 
 -- | Γ ⊢ A =:< α̂ ⊣ Δ: Under input context Γ, instantiate α̂ such that A <: α̂,
 -- with output context Δ.
-instantiateR :: Ctx -> Type -> TypVar -> State Int Ctx
+instantiateR :: Ctx -> Polytype -> TypVar -> State Int Ctx
 -- instantiateR ctx a α̂ | trace ("instantiateR; ctx: " <> show ctx <> "  a: " <> show a <> "  α̂: " <> show α̂) False = undefined
 instantiateR ctx a α̂ = case instLSolve {- not a mistake! -} ctx α̂ a of
   Just ctx -> pure ctx                                       -- InstRSolve ≡ flip InstLSolve
   Nothing  -> case a of
-    TExt{} -> instantiateL ctx α̂ a                           -- InstRReach ≡ flip InstLReach
+    Exist{} -> instantiateL ctx α̂ a                           -- InstRReach ≡ flip InstLReach
     a₁ :-> a₂ -> do                                          -- InstRArr
       let (ctxL, ctxR) = splitCtx ctx (CUns α̂)
       â₁ <- fresh
@@ -341,16 +344,16 @@ instantiateR ctx a α̂ = case instLSolve {- not a mistake! -} ctx α̂ a of
             [ ctxL
             , [ CUns â₂
               , CUns â₁
-              , CSol α̂ (MTExt â₁ :-< MTExt â₂)
+              , CSol α̂ (Exist â₁ :-> Exist â₂)
               ]
             , ctxR
             ]
       ctxΘ <- instantiateL extCtx â₁ a₁
       instantiateR ctxΘ (applyCtx ctxΘ a₂) â₂
-    TForall β b -> do                                        -- InstRAIIL
+    Forall β b -> do                                        -- InstRAIIL
       β̂fresh <- fresh
       let extCtx = ctx ++ [CMar β̂fresh, CUns β̂fresh]
-          cleanB = substType (TExt β̂fresh) β b
+          cleanB = substType (Exist β̂fresh) β b
       dropAfterItem (CMar β̂fresh) <$>
         instantiateR extCtx cleanB α̂
     _ -> die
@@ -361,7 +364,7 @@ instantiateR ctx a α̂ = case instLSolve {- not a mistake! -} ctx α̂ a of
 
 -- | Γ ⊢ e ⇒ A ⊣ Δ: Under input context Γ, e synthesizes (infers) output type
 -- A, with output context Δ.
-infer :: Ctx -> Expr -> State Int (Type, Ctx)
+infer :: Ctx -> Expr -> State Int (Polytype, Ctx)
 -- infer ctx e | trace ("infer; ctx: " <> show ctx <> "  e: " <> show e) False = undefined
 infer ctx e = case e of
   Var x   ->                                                      -- Var
@@ -378,22 +381,22 @@ infer ctx e = case e of
     let x' = "_" <> show freshX -- psychological
     α̂ <- fresh
     β̂ <- fresh
-    let extCtx = ctx ++ [ CUns α̂, CUns β̂, CAnn x' (TExt α̂) ]
+    let extCtx = ctx ++ [ CUns α̂, CUns β̂, CAnn x' (Exist α̂) ]
         cleanE = substExpr (Var x') x e
-    ctxΔ <- dropAfterItem (CAnn x' (TExt α̂)) <$> -- Δ
-      check extCtx cleanE (TExt β̂)               -- Δ,x:α̂,Θ
-    pure (TExt α̂ :-> TExt β̂, ctxΔ)
+    ctxΔ <- dropAfterItem (CAnn x' (Exist α̂)) <$> -- Δ
+      check extCtx cleanE (Exist β̂)               -- Δ,x:α̂,Θ
+    pure (Exist α̂ :-> Exist β̂, ctxΔ)
   App e₁ e₂ -> do                                                 -- →E
     (a, ctxΘ) <- infer ctx e₁
     appType ctxΘ (applyCtx ctxΘ a) e₂
 
 -- | Γ ⊢ e ⇐ A ⊣ Δ: Under input context Γ, e checks against input type A, with
 -- output context Δ.
-check :: Ctx -> Expr -> Type -> State Int Ctx
+check :: Ctx -> Expr -> Polytype -> State Int Ctx
 -- check ctx e b | trace ("check; ctx" <> show ctx <> "  e: " <> show e <> "  b: " <> show b) False = undefined
 check ctx e b = case (e, b) of
   (Unit, TUnit)    -> pure ctx                                    -- 1I
-  (_, TForall α a) -> do                                          -- ∀I
+  (_, Forall α a) -> do                                          -- ∀I
     αfresh <- fresh
     let extCtx = ctx ++ [CVar αfresh]
         cleanA = substType (TVar αfresh) α a
@@ -412,15 +415,15 @@ check ctx e b = case (e, b) of
 
 -- | Γ ⊢ A ∙ e ⇒> C ⊣ Δ: Under input context Γ, applying a function of type A
 -- to e synthesises type C, with output context Δ.
-appType :: Ctx -> Type -> Expr -> State Int (Type, Ctx)
+appType :: Ctx -> Polytype -> Expr -> State Int (Polytype, Ctx)
 -- appType ctx e b | trace ("appType; ctx" <> show ctx <> "  e: " <> show e <> "  b: " <> show b) False = undefined
 appType ctx b e = case b of
-  TForall α a -> do                                               -- ∀App
+  Forall α a -> do                                               -- ∀App
     α̂ <- fresh
     appType (ctx ++ [CUns α̂])
-            (substType (TExt α̂) α a) -- [α̂/a]A
+            (substType (Exist α̂) α a) -- [α̂/a]A
             e
-  TExt α̂      -> do                                               -- α̂App
+  Exist α̂      -> do                                               -- α̂App
     α̂₁ <- fresh
     α̂₂ <- fresh
     let (ctxL, ctxR) = splitCtx ctx (CUns α̂)
@@ -428,11 +431,11 @@ appType ctx b e = case b of
             [ ctxL
             , [ CUns α̂₂
               , CUns α̂₁
-              , CSol α̂ (MTExt α̂₁ :-< MTExt α̂₂)
+              , CSol α̂ (Exist α̂₁ :-> Exist α̂₂)
               ]
             , ctxR
             ]
-    (TExt α̂₂, ) <$> check extCtx e (TExt α̂₁)
+    (Exist α̂₂, ) <$> check extCtx e (Exist α̂₁)
   a :-> c     -> (c, ) <$> check ctx e a                          -- →App
   _           -> die
 
